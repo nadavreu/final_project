@@ -4,12 +4,14 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QPixmap
 from .main_window import MainWindow
 from .add_patient_window import AddPatientWindow
+from .add_user_window import AddUserWindow
 from .base_window import BaseWindow
 
 class HomeWindow(BaseWindow):
-    def __init__(self):
+    def __init__(self, user_role=None):
         # Initialize with no back button but with power off button
         super().__init__(show_back_button=False, show_power_off=True)
+        self.user_role = user_role
         self.init_ui()
 
     def init_ui(self):
@@ -212,6 +214,16 @@ class HomeWindow(BaseWindow):
         add_patient_btn.clicked.connect(self.show_add_patient)
         layout.addWidget(add_patient_btn)
         
+        # Add User button (only for administrators)
+        if self.user_role == 'Administrator':
+            add_user_btn = QPushButton('Add User')
+            add_user_btn.setFixedHeight(button_height)
+            if not horizontal:
+                add_user_btn.setFixedWidth(button_width)
+            add_user_btn.setStyleSheet(button_style)
+            add_user_btn.clicked.connect(self.show_add_user)
+            layout.addWidget(add_user_btn)
+        
         # Patient Control Panel button
         control_panel_btn = QPushButton('Patient Control Panel')
         control_panel_btn.setFixedHeight(button_height)
@@ -236,9 +248,17 @@ class HomeWindow(BaseWindow):
         self.add_patient_window.show()
         self.hide()
 
+    def show_add_user(self):
+        """Show the add user window."""
+        self.add_user_window = AddUserWindow(user_role=self.user_role)
+        self.add_user_window.show()
+        self.hide()
+
     def show_control_panel(self):
         """Show the patient control panel (main window)."""
         self.main_window = MainWindow()
+        # Store the user role in the main window for later use
+        self.main_window.user_role = self.user_role
         self.main_window.show()
         self.hide()
 

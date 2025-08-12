@@ -812,7 +812,9 @@ class MainWindow(BaseWindow):
     def go_back(self):
         """Return to home window."""
         from .home_window import HomeWindow
-        self.home_window = HomeWindow()
+        # Use the stored user role if available
+        user_role = getattr(self, 'user_role', None)
+        self.home_window = HomeWindow(user_role=user_role)
         self.home_window.show()
         self.close()
 

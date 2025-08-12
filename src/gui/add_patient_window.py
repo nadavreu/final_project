@@ -141,7 +141,7 @@ class AddPatientWindow(BaseWindow):
     def go_back(self):
         """Return to home window."""
         from .home_window import HomeWindow
-        self.home_window = HomeWindow()
+        self.home_window = HomeWindow()  # No role needed for patient window
         self.home_window.show()
         self.close()
 

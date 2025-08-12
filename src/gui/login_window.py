@@ -150,7 +150,7 @@ class LoginWindow(BaseWindow):
         """Show the home window and close login window."""
         try:
             if self.home_window is None:
-                self.home_window = HomeWindow()
+                self.home_window = HomeWindow(user_role=role)
             self.home_window.show()
             self.close()
         except Exception as e:

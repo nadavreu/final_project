@@ -1,4 +1,5 @@
 import numpy as np
+import time
 from scipy.signal import welch, find_peaks, peak_prominences
 from scipy.stats import entropy
 
@@ -7,26 +8,102 @@ class HeartRateEstimator:
         self.fs = sampling_rate
         self.min_hr_hz = 40 / 60.0
         self.max_hr_hz = 180 / 60.0
+        self.last_hr_freq = None
+        self.freq_stability_threshold = 0.5  # Hz tolerance for frequency changes (more lenient)
+        self.min_confidence_threshold = 0.4  # Lower confidence threshold to allow better convergence
+        self.convergence_mode = True  # Allow more flexibility during initial convergence
+        self.convergence_timeout = 30  # seconds to allow convergence
+        self.start_time = time.time()
 
     def estimate(self, signal):
-        freqs, power = welch(signal, fs=self.fs, nperseg=min(256, len(signal)), nfft=2**12)
-        band_mask = (freqs >= self.min_hr_hz) & (freqs <= self.max_hr_hz)
-        freqs = freqs[band_mask]
-        power = power[band_mask]
-
-        if len(power) == 0:
+        """Estimate heart rate using frequency domain with robust peak selection."""
+        try:
+            # 1. Frequency domain analysis with longer window for stability
+            window_size = min(512, len(signal))  # Longer window for better frequency resolution
+            freqs, power = welch(signal, fs=self.fs, nperseg=window_size, nfft=2**12)
+            
+            # 2. Focus on heart rate band
+            band_mask = (freqs >= self.min_hr_hz) & (freqs <= self.max_hr_hz)
+            freqs = freqs[band_mask]
+            power = power[band_mask]
+            
+            if len(power) == 0:
+                return None, 0.0
+            
+            # 3. Find peaks with robust criteria
+            # Use relative prominence to avoid being too sensitive
+            min_prominence = 0.15 * np.max(power)  # Higher threshold for stability
+            peaks, properties = find_peaks(power, distance=5, prominence=min_prominence)
+            
+            if len(peaks) == 0:
+                return None, 0.0
+            
+            # 4. Score peaks based on multiple criteria
+            peak_scores = []
+            for i, peak_idx in enumerate(peaks):
+                freq = freqs[peak_idx]
+                hr_bpm = freq * 60.0
+                
+                # Score based on peak quality, not frequency preference
+                prominence = properties['prominences'][i] / np.max(power)
+                
+                # Prefer peaks that are well-separated from others
+                separation_score = 1.0
+                for j, other_peak in enumerate(peaks):
+                    if i != j:
+                        other_freq = freqs[other_peak]
+                        freq_diff = abs(freq - other_freq)
+                        if freq_diff < 0.1:  # Penalize peaks too close to others
+                            separation_score *= 0.5
+                
+                # Combined score - focus on peak quality, not frequency
+                score = 0.7 * prominence + 0.3 * separation_score
+                peak_scores.append(score)
+            
+            # 5. Select best peak
+            best_idx = peaks[np.argmax(peak_scores)]
+            hr_freq = freqs[best_idx]
+            hr_bpm = hr_freq * 60.0
+            
+            # 6. Calculate confidence based on peak quality
+            best_score = max(peak_scores)
+            confidence = min(best_score, 1.0)
+            
+            # 7. Stability check with convergence mode
+            current_time = time.time()
+            in_convergence = current_time - self.start_time < self.convergence_timeout
+            
+            if self.last_hr_freq is not None:
+                last_bpm = self.last_hr_freq * 60.0
+                bpm_diff = abs(hr_bpm - last_bpm)
+                
+                # Adaptive thresholds
+                if in_convergence:
+                    stability_threshold = 25  # BPM tolerance during convergence
+                    confidence_threshold = 0.4  # Lower confidence threshold
+                    print(f"Convergence mode: allowing larger changes ({bpm_diff:.1f} BPM)")
+                else:
+                    stability_threshold = 15  # BPM tolerance after convergence
+                    confidence_threshold = 0.6
+                
+                if bpm_diff > stability_threshold:
+                    print(f"Stability check failed: {bpm_diff:.1f} BPM change > {stability_threshold} BPM threshold")
+                    if confidence < confidence_threshold:
+                        print(f"Low confidence ({confidence:.2f}) - keeping previous BPM")
+                        hr_bpm = last_bpm
+                        hr_freq = self.last_hr_freq
+                    else:
+                        print(f"High confidence ({confidence:.2f}) - allowing BPM change")
+                else:
+                    print(f"BPM stable: {bpm_diff:.1f} BPM change")
+            
+            # Update last frequency
+            self.last_hr_freq = hr_freq
+            
+            print(f"Frequency-domain HR: {hr_bpm:.1f} BPM, confidence: {confidence:.2f}, peaks: {len(peaks)}")
+            
+            return hr_bpm, confidence
+            
+        except Exception as e:
+            print(f"Frequency-domain estimation error: {e}")
             return None, 0.0
-
-        peaks, _ = find_peaks(power, distance=5)
-        if len(peaks) == 0:
-            return None, 0.0
-
-        prominences = peak_prominences(power, peaks)[0]
-        best_idx = peaks[np.argmax(prominences)]
-        hr_freq = freqs[best_idx]
-
-        # Confidence using entropy and peak shape
-        psd_entropy = entropy(power / (np.sum(power) + 1e-6))
-        confidence = 1.0 - psd_entropy  # Lower entropy → more confident
-
-        return hr_freq * 60.0, max(0.0, min(1.0, confidence))

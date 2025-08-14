@@ -615,6 +615,7 @@
 from collections import deque
 import numpy as np
 import logging
+import time
 from .preprocessing import SignalPreprocessor
 from .ica import ICAExtractor
 from .hr_estimation import HeartRateEstimator
@@ -637,15 +638,56 @@ class SignalProcessor:
         self.roi_checker = ROIStabilityChecker()
         self.last_bpm = None
         self.green_values = []#TODO: check if needed
+        
+        # Initialization delay to avoid startup noise
+        self.init_delay = 2.0  # 2 seconds delay
+        self.start_time = None
+        self.initialized = False
+        
+        # ROI tracking for automatic reset
+        self.last_roi_stable = False
+        self.roi_lost = False
 
     def process_frame(self, frame, roi):
+        # Check for ROI loss first (when roi becomes None or frame becomes None)
+        if (frame is None or roi is None) and self.last_roi_stable:
+            print("ROI lost (None detected) - resetting signal processor")
+            self.reset()
+            self.roi_lost = True
+            self.last_roi_stable = False
+            return None, 0.0
+        
         if frame is None or roi is None:
             return None, 0.0
+
+        # Initialize start time if not set
+        if self.start_time is None:
+            self.start_time = time.time()
+            print(f"Starting initialization delay: {self.init_delay} seconds")
+
+        # Check if initialization delay is complete
+        current_time = time.time()
+        if not self.initialized and (current_time - self.start_time) < self.init_delay:
+            remaining = self.init_delay - (current_time - self.start_time)
+            print(f"Initialization delay: {remaining:.1f}s remaining")
+            return None, 0.0
+        elif not self.initialized:
+            self.initialized = True
+            print("Initialization complete - starting heart rate measurement")
 
         x, y, w, h = roi
         roi_patch = frame[y:y + h, x:x + w]
 
-        if not self.roi_checker.is_stable(roi_patch):
+        # Check if ROI was lost and reset if needed
+        current_roi_stable = self.roi_checker.is_stable(roi_patch)
+        if self.last_roi_stable and not current_roi_stable:
+            print("ROI lost (unstable) - resetting signal processor")
+            self.reset()
+            # Signal that displays should be cleared
+            self.roi_lost = True
+        self.last_roi_stable = current_roi_stable
+
+        if not current_roi_stable:
             self.logger.debug("ROI patch unstable. Skipping frame.")
             return self.last_bpm, 0.0
 
@@ -669,24 +711,116 @@ class SignalProcessor:
         # Step 3: Normalize (robust)
         signal = self.preprocessor.normalize_robust(signal)
 
-        # Step 4: ICA extraction
-        signal = self.ica.extract_best_component(signal)
+        # Step 4: Adaptive signal enhancement (replacing ICA)
+        signal = self.enhance_ppg_signal(signal)
 
         # Step 5: Estimate heart rate
         bpm, confidence = self.hr_estimator.estimate(signal)
 
         # Step 6: Outlier rejection / temporal filtering
-        filtered_bpm = self.hr_filter.update(bpm)
+        filtered_bpm = self.hr_filter.update(bpm, confidence)
         self.last_bpm = filtered_bpm
 
         return filtered_bpm, confidence
+
+    def enhance_ppg_signal(self, signal):
+        """Enhanced PPG signal processing without ICA - more stable approach."""
+        try:
+            # 1. Apply bandpass filter to focus on heart rate frequencies
+            from scipy.signal import butter, filtfilt
+            nyquist = self.fs / 2
+            low = 0.8 / nyquist  # 48 BPM
+            high = 3.0 / nyquist  # 180 BPM
+            b, a = butter(4, [low, high], btype='band')
+            filtered = filtfilt(b, a, signal)
+            
+            # 2. Apply adaptive smoothing based on signal quality
+            signal_quality = self._assess_signal_quality(filtered)
+            if signal_quality > 0.7:  # High quality signal
+                # Light smoothing
+                from scipy.signal import savgol_filter
+                smoothed = savgol_filter(filtered, 7, 2)
+            else:  # Lower quality signal
+                # More aggressive smoothing
+                from scipy.signal import savgol_filter
+                smoothed = savgol_filter(filtered, 11, 3)
+            
+            # 3. Remove baseline wander with more robust method
+            window_size = min(30, len(smoothed) // 4)
+            if window_size > 5:
+                baseline = np.convolve(smoothed, np.ones(window_size)/window_size, mode='same')
+                enhanced = smoothed - baseline
+            else:
+                enhanced = smoothed
+            
+            # 4. Apply temporal consistency check
+            enhanced = self._apply_temporal_consistency(enhanced)
+            
+            print(f"Signal enhancement: quality={signal_quality:.2f}, smoothing={'light' if signal_quality > 0.7 else 'aggressive'}")
+            
+            return enhanced
+            
+        except Exception as e:
+            self.logger.error(f"Signal enhancement error: {e}")
+            return signal
+    
+    def _apply_temporal_consistency(self, signal):
+        """Apply temporal consistency to prevent sudden changes."""
+        try:
+            # Check for sudden amplitude changes
+            diff = np.abs(np.diff(signal))
+            mean_diff = np.mean(diff)
+            std_diff = np.std(diff)
+            
+            # If there are sudden large changes, apply additional smoothing
+            if std_diff > 2 * mean_diff:
+                from scipy.signal import savgol_filter
+                signal = savgol_filter(signal, 9, 2)
+                print("Applied additional smoothing due to temporal inconsistency")
+            
+            return signal
+            
+        except Exception:
+            return signal
+    
+    def _assess_signal_quality(self, signal):
+        """Assess the quality of the PPG signal."""
+        try:
+            # Calculate signal-to-noise ratio in heart rate band
+            from scipy.signal import welch
+            freqs, power = welch(signal, fs=self.fs, nperseg=min(256, len(signal)))
+            
+            # Heart rate band power
+            hr_mask = (freqs >= 0.8) & (freqs <= 3.0)
+            hr_power = np.sum(power[hr_mask])
+            total_power = np.sum(power)
+            
+            # SNR in heart rate band
+            snr = hr_power / (total_power - hr_power + 1e-6)
+            
+            # Normalize to [0,1]
+            quality = min(snr / 2.0, 1.0)
+            
+            return quality
+            
+        except Exception:
+            return 0.5
 
     def reset(self):
         """Reset the signal processor state for a fresh measurement."""
         self.buffer.clear()
         self.last_bpm = None
         self.green_values.clear()
-        self.logger.debug("Signal processor reset")
+        self.start_time = None
+        self.initialized = False
+        self.logger.debug("Signal processor reset - initialization delay will be applied")
+    
+    def was_roi_lost(self):
+        """Check if ROI was lost and reset the flag."""
+        if self.roi_lost:
+            self.roi_lost = False
+            return True
+        return False
 
 
 

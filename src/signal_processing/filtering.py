@@ -7,7 +7,7 @@ class HeartRateFilter:
     def __init__(self, window_size=5):
         self.history = deque(maxlen=window_size)
 
-    def update(self, new_bpm):
+    def update(self, new_bpm, confidence=0.5):
         if new_bpm is None:
             return None
         self.history.append(new_bpm)

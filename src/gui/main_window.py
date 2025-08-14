@@ -589,6 +589,14 @@ class MainWindow(BaseWindow):
                 self.start_time = time.time()
             current_time = time.time() - self.start_time
             
+            # Always call signal processor to check for ROI loss
+            # Check if ROI was lost and clear displays
+            if self.signal_processor.was_roi_lost():
+                print("Clearing displays due to ROI loss")
+                self.heart_rate_value.setText("-- BPM")
+                self.freq_value.setText("-- Hz")
+                # Don't clear plot data - keep history for graphs
+            
             # Process frame if we have a valid ROI
             if self.current_roi is not None:
                 x, y, w, h = self.current_roi
@@ -622,6 +630,9 @@ class MainWindow(BaseWindow):
                 
                 # Draw ROI on frame
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            else:
+                # Call signal processor with None ROI to trigger reset
+                self.signal_processor.process_frame(frame, None)
             
             # Update plots
             if len(self.raw_values) > 0:

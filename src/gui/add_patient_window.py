@@ -145,6 +145,9 @@ class AddPatientWindow(BaseWindow):
         self.home_window.show()
         self.close()
 
+
+
+
     def closeEvent(self, event):
         """Handle window close event."""
         event.accept() 

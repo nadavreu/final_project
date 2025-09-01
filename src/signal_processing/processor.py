@@ -639,6 +639,18 @@ class SignalProcessor:
         self.last_bpm = None
         self.green_values = []#TODO: check if needed
         
+        # Multi-ROI support
+        self.roi_buffers = {
+            'forehead': deque(maxlen=self.fs * 10),
+            'left_cheek': deque(maxlen=self.fs * 10),
+            'right_cheek': deque(maxlen=self.fs * 10)
+        }
+        self.roi_qualities = {
+            'forehead': 0.0,
+            'left_cheek': 0.0,
+            'right_cheek': 0.0
+        }
+        
         # Initialization delay to avoid startup noise
         self.init_delay = 2.0  # 2 seconds delay
         self.start_time = None
@@ -647,6 +659,37 @@ class SignalProcessor:
         # ROI tracking for automatic reset
         self.last_roi_stable = False
         self.roi_lost = False
+
+    def extract_multi_roi(self, frame, face_roi):
+        """Extract multiple ROIs from face region: forehead, left cheek, right cheek."""
+        if frame is None or face_roi is None:
+            return None
+            
+        try:
+            x, y, w, h = face_roi
+            
+            # Define ROI regions as fractions of face dimensions
+            rois = {}
+            
+            # Forehead: upper 30% of face, centered
+            forehead_h = int(h * 0.3)
+            rois['forehead'] = (x, y, w, forehead_h)
+            
+            # Left cheek: middle-left portion of face
+            cheek_y = y + int(h * 0.3)
+            cheek_h = int(h * 0.4)
+            cheek_w = int(w * 0.4)
+            rois['left_cheek'] = (x, cheek_y, cheek_w, cheek_h)
+            
+            # Right cheek: middle-right portion of face
+            right_cheek_x = x + int(w * 0.6)
+            rois['right_cheek'] = (right_cheek_x, cheek_y, cheek_w, cheek_h)
+            
+            return rois
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting multi-ROI: {e}")
+            return None
 
     def process_frame(self, frame, roi):
         # Check for ROI loss first (when roi becomes None or frame becomes None)
@@ -675,33 +718,70 @@ class SignalProcessor:
             self.initialized = True
             print("Initialization complete - starting heart rate measurement")
 
-        x, y, w, h = roi
-        roi_patch = frame[y:y + h, x:x + w]
-
-        # Check if ROI was lost and reset if needed
-        current_roi_stable = self.roi_checker.is_stable(roi_patch)
-        if self.last_roi_stable and not current_roi_stable:
-            print("ROI lost (unstable) - resetting signal processor")
-            self.reset()
-            # Signal that displays should be cleared
-            self.roi_lost = True
-        self.last_roi_stable = current_roi_stable
-
-        if not current_roi_stable:
-            self.logger.debug("ROI patch unstable. Skipping frame.")
+        # Extract multiple ROIs from the face region
+        multi_rois = self.extract_multi_roi(frame, roi)
+        if multi_rois is None:
             return self.last_bpm, 0.0
 
-        # Extract green channel
-        green = roi_patch[:, :, 1].astype(np.float32)
-        mean_val = np.mean(green)
-        self.buffer.append(mean_val)
+        # Process each ROI and collect signals
+        roi_signals = {}
+        for roi_name, roi_coords in multi_rois.items():
+            x, y, w, h = roi_coords
+            
+            # Ensure ROI is within frame bounds
+            if x < 0 or y < 0 or x + w > frame.shape[1] or y + h > frame.shape[0]:
+                continue
+                
+            roi_patch = frame[y:y + h, x:x + w]
+            
+            # Check ROI stability
+            if not self.roi_checker.is_stable(roi_patch):
+                continue
+                
+            # Extract green channel
+            green = roi_patch[:, :, 1].astype(np.float32)
+            mean_val = np.mean(green)
+            
+            # Add to ROI-specific buffer
+            self.roi_buffers[roi_name].append(mean_val)
+            
+            # Calculate signal quality for this ROI
+            if len(self.roi_buffers[roi_name]) >= self.fs * 2:
+                signal = np.array(self.roi_buffers[roi_name])
+                quality = self._calculate_roi_quality(signal)
+                self.roi_qualities[roi_name] = quality
+                roi_signals[roi_name] = signal
 
-        if len(self.buffer) < self.fs * 2:
-            return None, 0.0
+        # Use ROI fusion if we have multiple signals
+        if len(roi_signals) > 1:
+            from .roi_fusion import ROIFusion
+            if not hasattr(self, 'roi_fusion'):
+                self.roi_fusion = ROIFusion()
+            
+            fused_signal, fusion_confidence = self.roi_fusion.fuse_signals(
+                roi_signals, self.roi_qualities
+            )
+            
+            if fused_signal is not None:
+                # Process the fused signal
+                bpm, confidence = self._process_signal(fused_signal)
+                # Combine fusion confidence with signal confidence
+                final_confidence = min(confidence * fusion_confidence, 1.0)
+                filtered_bpm = self.hr_filter.update(bpm, final_confidence)
+                self.last_bpm = filtered_bpm
+                return filtered_bpm, final_confidence
+        
+        # Fallback to single ROI processing (forehead)
+        elif 'forehead' in roi_signals:
+            bpm, confidence = self._process_signal(roi_signals['forehead'])
+            filtered_bpm = self.hr_filter.update(bpm, confidence)
+            self.last_bpm = filtered_bpm
+            return filtered_bpm, confidence
 
-        # Convert buffer to numpy array
-        signal = np.array(self.buffer)
+        return self.last_bpm, 0.0
 
+    def _process_signal(self, signal):
+        """Process a single signal through the pipeline."""
         # Step 1: Smooth
         signal = self.preprocessor.smooth_temporal(signal)
 
@@ -717,11 +797,33 @@ class SignalProcessor:
         # Step 5: Estimate heart rate
         bpm, confidence = self.hr_estimator.estimate(signal)
 
-        # Step 6: Outlier rejection / temporal filtering
-        filtered_bpm = self.hr_filter.update(bpm, confidence)
-        self.last_bpm = filtered_bpm
+        return bpm, confidence
 
-        return filtered_bpm, confidence
+    def _calculate_roi_quality(self, signal):
+        """Calculate signal quality for a specific ROI."""
+        try:
+            # Calculate signal-to-noise ratio
+            signal_std = np.std(signal)
+            signal_mean = np.mean(signal)
+            
+            # Calculate temporal consistency
+            diff = np.abs(np.diff(signal))
+            temporal_consistency = 1.0 / (1.0 + np.std(diff) / (np.mean(diff) + 1e-6))
+            
+            # Calculate frequency domain quality
+            from scipy.signal import welch
+            freqs, power = welch(signal, fs=self.fs, nperseg=min(256, len(signal)))
+            hr_mask = (freqs >= 0.8) & (freqs <= 3.0)
+            hr_power = np.sum(power[hr_mask])
+            total_power = np.sum(power)
+            snr = hr_power / (total_power - hr_power + 1e-6)
+            
+            # Combine metrics
+            quality = 0.4 * temporal_consistency + 0.6 * min(snr / 2.0, 1.0)
+            return min(max(quality, 0.0), 1.0)
+            
+        except Exception:
+            return 0.5
 
     def enhance_ppg_signal(self, signal):
         """Enhanced PPG signal processing without ICA - more stable approach."""
@@ -813,6 +915,12 @@ class SignalProcessor:
         self.green_values.clear()
         self.start_time = None
         self.initialized = False
+        
+        # Reset multi-ROI buffers and qualities
+        for roi_name in self.roi_buffers:
+            self.roi_buffers[roi_name].clear()
+            self.roi_qualities[roi_name] = 0.0
+            
         self.logger.debug("Signal processor reset - initialization delay will be applied")
     
     def was_roi_lost(self):

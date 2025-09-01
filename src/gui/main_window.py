@@ -61,6 +61,48 @@ class MainWindow(BaseWindow):
         
         # Initialize quality indicator
         self.setup_quality_indicator()
+        
+        # Signal processing for visualization (faceHR-style)
+        self.signal_buffer = deque(maxlen=300)  # 10 seconds at 30fps
+        self.baseline = None
+        self.signal_alpha = 0.95  # Smoothing factor
+
+    def process_raw_signal(self, green_value):
+        """Process raw green channel to show PPG signal peaks (faceHR technique)."""
+        try:
+            # Add to buffer
+            self.signal_buffer.append(green_value)
+            
+            if len(self.signal_buffer) < 10:
+                return green_value
+            
+            # Convert to numpy array
+            signal = np.array(list(self.signal_buffer))
+            
+            # 1. Remove DC component and detrend
+            signal = signal - np.mean(signal)
+            signal = signal - np.polyval(np.polyfit(range(len(signal)), signal, 1), range(len(signal)))
+            
+            # 2. Apply bandpass filter (0.7-4 Hz for heart rate)
+            from scipy.signal import butter, filtfilt
+            nyquist = 15  # 30fps / 2
+            low = 0.7 / nyquist
+            high = 4.0 / nyquist
+            b, a = butter(4, [low, high], btype='band')
+            filtered = filtfilt(b, a, signal)
+            
+            # 3. Normalize to show peaks clearly
+            if len(filtered) > 0:
+                normalized = (filtered - np.mean(filtered)) / (np.std(filtered) + 1e-6)
+                # Amplify the signal to make peaks more visible
+                amplified = normalized * 50  # Scale factor to make peaks visible
+                return amplified[-1]  # Return the latest processed value
+            
+            return green_value
+            
+        except Exception as e:
+            self.logger.error(f"Error processing raw signal: {e}")
+            return green_value
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -652,8 +694,11 @@ class MainWindow(BaseWindow):
                 # Extract green channel mean from ROI
                 green_mean = np.mean(roi_frame[:, :, 1])
                 
-                # Store raw value
-                self.raw_values.append(green_mean)
+                # Process the raw signal to show PPG peaks (like faceHR)
+                processed_signal = self.process_raw_signal(green_mean)
+                
+                # Store both raw and processed values
+                self.raw_values.append(processed_signal)
                 self.signal_times.append(current_time)
                 
                 # Enable reset button only when stopped and we have data
@@ -801,7 +846,7 @@ class MainWindow(BaseWindow):
                 self.signal_ax.plot(times, values, 'g-', linewidth=1)
                 
                 # Set axis labels and title
-                self.signal_ax.set_title('Raw Signal')
+                self.signal_ax.set_title('PPG Signal (Processed)')
                 self.signal_ax.set_xlabel('Time (s)')
                 self.signal_ax.set_ylabel('Amplitude')
                 

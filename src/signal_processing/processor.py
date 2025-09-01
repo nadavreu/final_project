@@ -623,6 +623,7 @@ from .filtering import HeartRateFilter, ROIStabilityChecker
 from signal_processing.preprocessing import SignalPreprocessor
 from signal_processing.ica import ICAExtractor
 from signal_processing.hr_estimation import HeartRateEstimator
+from signal_processing.facehr_estimator import FaceHREstimator
 from signal_processing.filtering import HeartRateFilter, ROIStabilityChecker
 from signal_processing.performance import ParallelProcessor
 
@@ -634,6 +635,7 @@ class SignalProcessor:
         self.preprocessor = SignalPreprocessor(sampling_rate)
         self.ica = ICAExtractor()
         self.hr_estimator = HeartRateEstimator(sampling_rate)
+        self.facehr_estimator = FaceHREstimator(sampling_rate)  # New FaceHR estimator
         self.hr_filter = HeartRateFilter()
         self.roi_checker = ROIStabilityChecker()
         self.last_bpm = None
@@ -714,8 +716,8 @@ class SignalProcessor:
         # Step 4: Adaptive signal enhancement (replacing ICA)
         signal = self.enhance_ppg_signal(signal)
 
-        # Step 5: Estimate heart rate
-        bpm, confidence = self.hr_estimator.estimate(signal)
+        # Step 5: Estimate heart rate using FaceHR estimator
+        bpm, confidence = self.facehr_estimator.estimate(signal)
 
         # Step 6: Outlier rejection / temporal filtering
         filtered_bpm = self.hr_filter.update(bpm, confidence)
@@ -813,6 +815,15 @@ class SignalProcessor:
         self.green_values.clear()
         self.start_time = None
         self.initialized = False
+        
+        # Reset multi-ROI buffers and qualities
+        for roi_name in self.roi_buffers:
+            self.roi_buffers[roi_name].clear()
+            self.roi_qualities[roi_name] = 0.0
+        
+        # Reset FaceHR estimator
+        self.facehr_estimator.reset()
+        
         self.logger.debug("Signal processor reset - initialization delay will be applied")
     
     def was_roi_lost(self):

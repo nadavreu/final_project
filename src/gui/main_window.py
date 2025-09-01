@@ -123,6 +123,37 @@ class MainWindow(BaseWindow):
         controls_layout = QHBoxLayout(controls_widget)
         controls_layout.setSpacing(self.scaled(15))  # Add some space between controls
         
+        # Patient selection
+        patient_label = QLabel('Patient:')
+        patient_label.setStyleSheet('font-weight: bold;')
+        controls_layout.addWidget(patient_label)
+        
+        self.patient_combo = QComboBox()
+        self.patient_combo.addItem('Select Patient...')
+        self.patient_combo.currentIndexChanged.connect(self.on_patient_selected)
+        self.load_patients()
+        controls_layout.addWidget(self.patient_combo)
+        
+        # Refresh patients button
+        self.refresh_patients_btn = QPushButton('Refresh')
+        self.refresh_patients_btn.clicked.connect(self.load_patients)
+        self.refresh_patients_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #28a745;
+                color: white;
+                border: none;
+                border-radius: {self.scaled(5)}px;
+                padding: {self.scaled(8)}px {self.scaled(15)}px;
+                font-size: {self.scaled(12)}px;
+                min-height: {self.scaled(30)}px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #218838;
+            }}
+        """)
+        controls_layout.addWidget(self.refresh_patients_btn)
+        
         # Input type selection
         self.video_combo = QComboBox()
         self.video_combo.addItems(['Camera', 'Video File'])
@@ -184,6 +215,16 @@ class MainWindow(BaseWindow):
             }}
         """)
         measurements_layout = QVBoxLayout(measurements_widget)
+        
+        # Patient information display
+        patient_info_layout = QHBoxLayout()
+        patient_info_label = QLabel('Current Patient:')
+        patient_info_label.setStyleSheet('font-weight: bold;')
+        self.patient_info_value = QLabel('None selected')
+        self.patient_info_value.setStyleSheet('color: #666;')
+        patient_info_layout.addWidget(patient_info_label)
+        patient_info_layout.addWidget(self.patient_info_value)
+        measurements_layout.addLayout(patient_info_layout)
         
         # Heart rate display
         hr_layout = QHBoxLayout()
@@ -382,6 +423,12 @@ class MainWindow(BaseWindow):
         """Start video capture and processing."""
         try:
             if not self.is_running:
+                # Check if a patient is selected
+                patient_id = self.get_selected_patient_id()
+                if not patient_id:
+                    QMessageBox.warning(self, "Patient Required", "Please select a patient before starting the measurement.")
+                    return
+                
                 # Get selected input type
                 input_type = self.video_combo.currentText()
                 source = 0 if input_type == "Camera" else self.video_file
@@ -617,16 +664,16 @@ class MainWindow(BaseWindow):
                 bpm, confidence = self.signal_processor.process_frame(frame, self.current_roi)
                 
                 if bpm is not None:
-                    # Update heart rate display
-                    self.heart_rate_value.setText(f"{bpm:.1f} BPM")
+                    # Update heart rate display and save to database
+                    self.update_hr_display(bpm)
                     
                     # Update frequency display
                     freq = bpm / 60.0
                     self.freq_value.setText(f"{freq:.2f} Hz")
                     
-                    # Store heart rate data for plotting
-                    self.hr_values.append(bpm)
-                    self.hr_times.append(current_time)
+                    # Store heart rate data for plotting (already done in update_hr_display)
+                    # self.hr_values.append(bpm)
+                    # self.hr_times.append(current_time)
                 
                 # Draw ROI on frame
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
@@ -698,7 +745,7 @@ class MainWindow(BaseWindow):
             self.logger.error(f"Error displaying frame: {str(e)}")
 
     def update_hr_display(self, bpm):
-        """Update heart rate display."""
+        """Update heart rate display and save to database if patient is selected."""
         try:
             self.heart_rate_value.setText(f"{bpm:.1f} BPM")
             
@@ -709,6 +756,30 @@ class MainWindow(BaseWindow):
             
             self.hr_times.append(current_time)
             self.hr_values.append(bpm)
+            
+            # Save measurement to database if a patient is selected
+            patient_id = self.get_selected_patient_id()
+            if patient_id:
+                try:
+                    from database.db import Database
+                    db = Database()
+                    
+                    # Determine status based on heart rate value
+                    if 60 <= bpm <= 100:
+                        status = "Normal"
+                    elif bpm < 60:
+                        status = "Bradycardia"
+                    else:
+                        status = "Tachycardia"
+                    
+                    # Save measurement to database
+                    if db.add_measurement(patient_id, int(bpm), status):
+                        self.logger.info(f"Saved measurement for patient {patient_id}: {bpm:.1f} BPM ({status})")
+                    else:
+                        self.logger.warning(f"Failed to save measurement for patient {patient_id}")
+                        
+                except Exception as db_error:
+                    self.logger.error(f"Database error saving measurement: {str(db_error)}")
             
         except Exception as e:
             self.logger.error("Error updating HR display: %s", str(e))
@@ -819,6 +890,88 @@ class MainWindow(BaseWindow):
         self.reset_button.setEnabled(False)
         
         self.logger.info("All data reset.")
+
+    def load_patients(self):
+        """Load patients from database and populate the combo box."""
+        try:
+            from database.db import Database
+            db = Database()
+            
+            # Get current user role to filter patients if needed
+            user_role = getattr(self, 'user_role', None)
+            
+            # Get patients from database
+            if user_role == 'Administrator':
+                # Administrators can see all patients
+                patients = db.get_all_patients()
+            else:
+                # Other users see only their assigned patients
+                # For now, we'll show all patients since we don't have the current username
+                # In a real implementation, you'd pass the username from login
+                patients = db.get_all_patients()
+            
+            # Temporarily disconnect the signal to prevent triggering on_patient_selected during loading
+            self.patient_combo.currentIndexChanged.disconnect()
+            
+            # Clear existing items except the first "Select Patient..." item
+            self.patient_combo.clear()
+            self.patient_combo.addItem('Select Patient...')
+            
+            # Add patients to combo box
+            for patient in patients:
+                display_text = f"{patient['firstName']} {patient['lastName']} (ID: {patient['id']})"
+                self.patient_combo.addItem(display_text, patient['id'])
+            
+            # Reconnect the signal
+            self.patient_combo.currentIndexChanged.connect(self.on_patient_selected)
+            
+            self.logger.info(f"Loaded {len(patients)} patients into combo box")
+            
+        except Exception as e:
+            self.logger.error(f"Error loading patients: {str(e)}")
+            # Add a fallback item
+            self.patient_combo.clear()
+            self.patient_combo.addItem('Select Patient...')
+            self.patient_combo.addItem('Error loading patients')
+            # Reconnect the signal in case of error
+            try:
+                self.patient_combo.currentIndexChanged.connect(self.on_patient_selected)
+            except:
+                pass
+
+    def get_selected_patient_id(self):
+        """Get the ID of the currently selected patient."""
+        current_index = self.patient_combo.currentIndex()
+        if current_index > 0:  # Skip the "Select Patient..." item
+            return self.patient_combo.itemData(current_index)
+        return None
+
+    def on_patient_selected(self):
+        """Handle patient selection change."""
+        # Safety check to ensure UI elements exist
+        if not hasattr(self, 'patient_info_value'):
+            return
+            
+        patient_id = self.get_selected_patient_id()
+        if patient_id:
+            try:
+                from database.db import Database
+                db = Database()
+                patient = db.get_patient(patient_id)
+                if patient:
+                    display_text = f"{patient['firstName']} {patient['lastName']} (ID: {patient['id']})"
+                    self.patient_info_value.setText(display_text)
+                    self.patient_info_value.setStyleSheet('color: #333; font-weight: bold;')
+                else:
+                    self.patient_info_value.setText('Patient not found')
+                    self.patient_info_value.setStyleSheet('color: #e74c3c;')
+            except Exception as e:
+                self.logger.error(f"Error loading patient info: {str(e)}")
+                self.patient_info_value.setText('Error loading patient info')
+                self.patient_info_value.setStyleSheet('color: #e74c3c;')
+        else:
+            self.patient_info_value.setText('None selected')
+            self.patient_info_value.setStyleSheet('color: #666;')
 
     def go_back(self):
         """Return to home window."""

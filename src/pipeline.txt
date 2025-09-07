@@ -1,0 +1,175 @@
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           VIDEO INPUT STAGE                                     │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 1. VIDEO CAPTURE (VideoCapture)                                                 │
+│    • Read frame from webcam/video file                                          │
+│    • Frame rate control (max 60 FPS)                                            │
+│    • Error handling and recovery                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 2. FACE DETECTION (MediaPipe FaceDetector)                                      │
+│    • Convert frame to RGB                                                       │
+│    • Detect 468 facial landmarks using MediaPipe FaceMesh                      │
+│    • Extract forehead ROI (upper 30-35% of face)                               │
+│    • Apply ROI smoothing with exponential moving average                       │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 3. ROI VALIDATION (ROIStabilityChecker)                                        │
+│    • Convert ROI to grayscale                                                   │
+│    • Calculate standard deviation                                               │
+│    • Check if std_dev >= min_std (5.0)                                         │
+│    • Return stability status                                                    │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 4. SIGNAL EXTRACTION                                                            │
+│    • Extract green channel from ROI patch                                       │
+│    • Calculate mean green intensity value                                       │
+│    • Add to 10-second circular buffer (deque)                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 5. INITIALIZATION CHECK                                                         │
+│    • Check if 2-second initialization delay is complete                        │
+│    • Ensure buffer has at least 60 samples (2 seconds at 30 FPS)              │
+│    • Skip processing if conditions not met                                      │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 6. SIGNAL PREPROCESSING (SignalPreprocessor)                                    │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 6.1 TEMPORAL SMOOTHING                                                  │   │
+│    │    • Apply Savitzky-Golay filter (window=15, poly=2)                    │   │
+│    │    • ~0.5 second smoothing window                                       │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 6.2 ADAPTIVE NOTCH FILTERING                                            │   │
+│    │    • Remove flicker noise at 1.0, 2.0, 3.0 Hz                          │   │
+│    │    • Use IIR notch filters with Q=30                                    │   │
+│    │    • Apply filtfilt for zero-phase filtering                            │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 6.3 ROBUST NORMALIZATION                                                │   │
+│    │    • Calculate median and MAD (Median Absolute Deviation)               │   │
+│    │    • Normalize: (values - median) / mad                                 │   │
+│    │    • Outlier-resistant normalization                                    │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 7. INDEPENDENT COMPONENT ANALYSIS (ICAExtractor)                               │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 7.1 PHASE-SHIFTED MATRIX CREATION                                      │   │
+│    │    • Create 5 phase-shifted signals (shifts: 0,1,2,3,4)                │   │
+│    │    • Use scipy.ndimage.shift for phase shifting                         │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 7.2 PCA + ICA PROCESSING                                               │   │
+│    │    • Apply PCA to reduce noise (5 components)                          │   │
+│    │    • Apply FastICA for component separation                             │   │
+│    │    • Extract 5 independent components                                   │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 7.3 COMPONENT SCORING & SELECTION                                      │   │
+│    │    • Score each component based on:                                     │   │
+│    │      - Heart rate band SNR (0.8-3.0 Hz)                               │   │
+│    │      - Temporal consistency                                            │   │
+│    │      - Peak prominence                                                 │   │
+│    │      - Periodicity                                                     │   │
+│    │      - Signal stability                                                │   │
+│    │    • Apply component stability check                                   │   │
+│    │    • Frequency consistency tracking                                    │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 8. SIGNAL ENHANCEMENT (within SignalProcessor)                                 │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 8.1 BANDPASS FILTERING                                                  │   │
+│    │    • Butterworth bandpass filter (4th order)                           │   │
+│    │    • Frequency range: 0.8-3.0 Hz (48-180 BPM)                          │   │
+│    │    • Apply filtfilt for zero-phase filtering                            │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 8.2 ADAPTIVE SMOOTHING                                                  │   │
+│    │    • Assess signal quality using Welch's PSD                           │   │
+│    │    • High quality (>0.7): Light smoothing (Savitzky-Golay 7,2)         │   │
+│    │    • Low quality (≤0.7): Aggressive smoothing (Savitzky-Golay 11,3)    │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 8.3 BASELINE REMOVAL                                                    │   │
+│    │    • Calculate moving average baseline (window=30 samples)              │   │
+│    │    • Subtract baseline from signal                                      │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 8.4 TEMPORAL CONSISTENCY                                                │   │
+│    │    • Check for sudden amplitude changes                                 │   │
+│    │    • Apply additional smoothing if std_diff > 2 * mean_diff            │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 9. HEART RATE ESTIMATION (HeartRateEstimator)                                  │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 9.1 FREQUENCY DOMAIN ANALYSIS                                          │   │
+│    │    • Apply Welch's power spectral density                              │   │
+│    │    • Window size: min(512, signal_length)                              │   │
+│    │    • FFT size: 2^12 for high frequency resolution                      │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 9.2 HEART RATE BAND FILTERING                                          │   │
+│    │    • Focus on 0.67-3.0 Hz (40-180 BPM)                                │   │
+│    │    • Extract power spectrum in heart rate band                         │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 9.3 PEAK DETECTION & SCORING                                           │   │
+│    │    • Find peaks with distance=5, prominence=0.15*max_power             │   │
+│    │    • Score peaks based on:                                             │   │
+│    │      - Prominence (70% weight)                                         │   │
+│    │      - Separation from other peaks (30% weight)                        │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 9.4 STABILITY & CONVERGENCE                                            │   │
+│    │    • Convergence mode: First 30 seconds allow larger changes           │   │
+│    │    • Stability check: Reject changes >15 BPM (after convergence)       │   │
+│    │    • Confidence-based acceptance of new values                         │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 10. OUTLIER FILTERING (HeartRateFilter)                                        │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 10.1 TEMPORAL FILTERING                                                │   │
+│    │    • Maintain 5-sample history buffer                                  │   │
+│    │    • Calculate median of recent values                                 │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │ 10.2 OUTLIER DETECTION                                                 │   │
+│    │    • Calculate z-scores for all values in buffer                       │   │
+│    │    • Reject values with |z-score| > 2.5                               │   │
+│    │    • Return median if outlier detected                                 │   │
+│    └─────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 11. OUTPUT & DISPLAY                                                           │
+│    • Return filtered heart rate (BPM) and confidence score                    │
+│    • Update GUI displays (heart rate, frequency, plots)                       │
+│    • Save measurement to database (if patient selected)                       │
+│    • Update real-time signal and heart rate plots                            │
+└─────────────────────────────────────────────────────────────────────────────────┘

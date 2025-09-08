@@ -40,20 +40,23 @@
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │ 3. CONTROL PANEL INITIALIZATION (MainWindow)                                   │
+│    • Initialize data buffers (10-second rolling windows)                       │
+│    • Setup real-time plotting (matplotlib with FigureCanvas)                   │
 │    • Initialize video capture system (VideoCapture)                            │
-│    • Initialize face detection (MediaPipe FaceDetector)                        │
 │    • Initialize signal processing pipeline (SignalProcessor)                   │
-│    • Setup real-time plotting (matplotlib)                                     │
+│    • Initialize face detection (MediaPipe FaceDetector)                        │
+│    • Setup GUI controls (video display, patient selection, input type)         │
 │    • Load patient list from database                                            │
-│    • Configure GUI controls and displays                                        │
+│    • Configure timers (video: 33ms, plots: 100ms)                             │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │ 4. MEASUREMENT SETUP                                                            │
-│    • User selects patient from dropdown                                         │
-│    • User selects input source (Camera/Video File)                             │
-│    • If video file: User selects file via file dialog                          │
+│    • User selects patient from dropdown (loaded from database)                 │
+│    • User selects input source (Camera/Video File) via combo box               │
+│    • If video file: User clicks "Open File" button to select file              │
+│    • System validates patient selection before allowing start                  │
 │    • User clicks "Start" to begin measurement                                   │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -69,6 +72,7 @@
 │    • Try multiple backends for camera (DSHOW, MSMF, ANY)                       │
 │    • Get video properties (FPS, resolution, frame count)                       │
 │    • Start frame reading loop at ~30 FPS (33ms intervals)                      │
+│    • Frame rate control with min_frame_interval (1/60 seconds)                 │
 │    • Error handling and recovery for failed captures                           │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -78,9 +82,11 @@
 │    • Convert frame from BGR to RGB for MediaPipe                               │
 │    • Process frame with MediaPipe FaceMesh                                     │
 │    • Extract 468 facial landmarks                                              │
-│    • Calculate forehead ROI (upper 30-35% of face)                             │
+│    • Calculate face bounding box from all landmarks                            │
+│    • Extract forehead ROI (upper 30% of face, 75% width)                      │
 │    • Apply exponential moving average smoothing (α=0.6)                        │
 │    • Maintain ROI stability with 5-frame history buffer                        │
+│    • Fallback ROI calculation if landmark access fails                         │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -94,7 +100,18 @@
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 8. SIGNAL EXTRACTION                                                            │
+│ 8. MAIN PROCESSING LOOP (MainWindow.update_frame)                               │
+│    • Read frame from video capture                                              │
+│    • Detect face and extract ROI                                                │
+│    • Process frame through signal processing pipeline                           │
+│    • Update GUI displays (heart rate, frequency, plots)                        │
+│    • Draw ROI overlay on video frame                                            │
+│    • Handle ROI loss and signal processor reset                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 9. SIGNAL EXTRACTION                                                            │
 │    • Extract green channel from ROI patch                                      │
 │    • Calculate mean green intensity value                                      │
 │    • Add to 10-second circular buffer (deque)                                  │
@@ -103,7 +120,7 @@
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 9. INITIALIZATION CHECK                                                         │
+│ 10. INITIALIZATION CHECK                                                        │
 │    • Check if 2-second initialization delay is complete                        │
 │    • Ensure buffer has at least 60 samples (2 seconds at 30 FPS)              │
 │    • Skip processing if conditions not met                                      │
@@ -112,20 +129,20 @@
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 10. SIGNAL PREPROCESSING (SignalPreprocessor)                                   │
+│ 11. SIGNAL PREPROCESSING (SignalPreprocessor)                                   │
 │    ┌─────────────────────────────────────────────────────────────────────────┐   │
-│    │ 10.1 TEMPORAL SMOOTHING                                                 │   │
+│    │ 11.1 TEMPORAL SMOOTHING                                                 │   │
 │    │    • Apply Savitzky-Golay filter (window=15, poly=2)                    │   │
 │    │    • ~0.5 second smoothing window                                       │   │
 │    └─────────────────────────────────────────────────────────────────────────┘   │
 │    ┌─────────────────────────────────────────────────────────────────────────┐   │
-│    │ 10.2 ADAPTIVE NOTCH FILTERING                                           │   │
+│    │ 11.2 ADAPTIVE NOTCH FILTERING                                           │   │
 │    │    • Remove flicker noise at 1.0, 2.0, 3.0 Hz                          │   │
 │    │    • Use IIR notch filters with Q=30                                    │   │
 │    │    • Apply filtfilt for zero-phase filtering                            │   │
 │    └─────────────────────────────────────────────────────────────────────────┘   │
 │    ┌─────────────────────────────────────────────────────────────────────────┐   │
-│    │ 10.3 ROBUST NORMALIZATION                                               │   │
+│    │ 11.3 ROBUST NORMALIZATION                                               │   │
 │    │    • Calculate median and MAD (Median Absolute Deviation)               │   │
 │    │    • Normalize: (values - median) / mad                                 │   │
 │    │    • Outlier-resistant normalization                                    │   │
@@ -134,34 +151,7 @@
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 11. INDEPENDENT COMPONENT ANALYSIS (ICAExtractor)                              │
-│    ┌─────────────────────────────────────────────────────────────────────────┐   │
-│    │ 11.1 PHASE-SHIFTED MATRIX CREATION                                     │   │
-│    │    • Create 5 phase-shifted signals (shifts: 0,1,2,3,4)                │   │
-│    │    • Use scipy.ndimage.shift for phase shifting                         │   │
-│    └─────────────────────────────────────────────────────────────────────────┘   │
-│    ┌─────────────────────────────────────────────────────────────────────────┐   │
-│    │ 11.2 PCA + ICA PROCESSING                                               │   │
-│    │    • Apply PCA to reduce noise (5 components)                           │   │
-│    │    • Apply FastICA for component separation                             │   │
-│    │    • Extract 5 independent components                                   │   │
-│    └─────────────────────────────────────────────────────────────────────────┘   │
-│    ┌─────────────────────────────────────────────────────────────────────────┐   │
-│    │ 11.3 COMPONENT SCORING & SELECTION                                     │   │
-│    │    • Score each component based on:                                     │   │
-│    │      - Heart rate band SNR (0.8-3.0 Hz)                               │   │
-│    │      - Temporal consistency                                            │   │
-│    │      - Peak prominence                                                 │   │
-│    │      - Periodicity                                                     │   │
-│    │      - Signal stability                                                │   │
-│    │    • Apply component stability check                                   │   │
-│    │    • Frequency consistency tracking                                    │   │
-│    └─────────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 12. SIGNAL ENHANCEMENT (within SignalProcessor)                                 │
+│ 12. SIGNAL ENHANCEMENT (enhance_ppg_signal method)                              │
 │    ┌─────────────────────────────────────────────────────────────────────────┐   │
 │    │ 12.1 BANDPASS FILTERING                                                 │   │
 │    │    • Butterworth bandpass filter (4th order)                           │   │
@@ -252,6 +242,7 @@
 │    │ 15.3 DATABASE INTEGRATION                                               │   │
 │    │    • Save measurement to SQLite database                               │   │
 │    │    • Store: patient_id, timestamp, heart_rate, status                  │   │
+│    │    • Determine status: Normal (60-100), Bradycardia (<60), Tachycardia (>100) │
 │    │    • Link measurement to selected patient                              │   │
 │    │    • Update patient measurement history                                │   │
 │    └─────────────────────────────────────────────────────────────────────────┘   │
@@ -279,7 +270,6 @@
 │ • face_detection/mediapipe_detector.py - Face detection and ROI extraction     │
 │ • signal_processing/processor.py - Main signal processing orchestrator         │
 │ • signal_processing/preprocessing.py - Signal filtering and normalization      │
-│ • signal_processing/ica.py - Independent Component Analysis                    │
 │ • signal_processing/hr_estimation.py - Heart rate estimation algorithms       │
 │ • signal_processing/filtering.py - Outlier detection and temporal filtering   │
 │ • database/db.py - SQLite database operations                                  │
@@ -303,7 +293,7 @@
 │ 4. Face Detection → ROI Extraction                                             │
 │ 5. Signal Extraction → Green Channel Analysis                                  │
 │ 6. Signal Processing → Multi-stage Filtering                                   │
-│ 7. ICA Analysis → Component Selection                                          │
+│ 7. Signal Enhancement → Bandpass Filtering & Adaptive Smoothing                │
 │ 8. Heart Rate Estimation → Frequency Domain Analysis                           │
 │ 9. Outlier Filtering → Temporal Smoothing                                      │
 │ 10. GUI Display → Real-time Visualization                                      │

@@ -49,8 +49,8 @@ class FaceDetector:
             forehead_center_y = face_y_min + forehead_height // 2
             
             # Make the forehead ROI wider than the face for better coverage
-            forehead_width = int(face_width * 1.2)  # 120% of face width
-            forehead_height = int(face_height * 0.35)  # 35% of face height
+            forehead_width = int(face_width * 0.75)  # 120% of face width
+            forehead_height = int(face_height * 0.275)  # 35% of face height
             
             # Center the ROI on the face center
             x_min = max(0, face_center_x - forehead_width // 2)

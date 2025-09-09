@@ -65,11 +65,20 @@ class HeartRateEstimator:
             hr_freq = freqs[best_idx]
             hr_bpm = hr_freq * 60.0
             
+            # DIAGNOSTIC: Print all peaks for debugging
+            print(f"All detected peaks:")
+            for i, peak_idx in enumerate(peaks):
+                freq = freqs[peak_idx]
+                bpm = freq * 60.0
+                prominence = properties['prominences'][i] / np.max(power)
+                print(f"  Peak {i}: {bpm:.1f} BPM ({freq:.3f} Hz), prominence={prominence:.3f}, score={peak_scores[i]:.3f}")
+            print(f"Selected: {hr_bpm:.1f} BPM ({hr_freq:.3f} Hz)")
+            
             # 6. Calculate confidence based on peak quality
             best_score = max(peak_scores)
             confidence = min(best_score, 1.0)
             
-            # 7. Stability check with convergence mode
+            # 7. Enhanced stability check with physiological constraints
             current_time = time.time()
             in_convergence = current_time - self.start_time < self.convergence_timeout
             
@@ -77,21 +86,29 @@ class HeartRateEstimator:
                 last_bpm = self.last_hr_freq * 60.0
                 bpm_diff = abs(hr_bpm - last_bpm)
                 
-                # Adaptive thresholds
+                # More conservative thresholds to prevent sudden jumps
                 if in_convergence:
-                    stability_threshold = 25  # BPM tolerance during convergence
-                    confidence_threshold = 0.4  # Lower confidence threshold
-                    print(f"Convergence mode: allowing larger changes ({bpm_diff:.1f} BPM)")
+                    stability_threshold = 15  # Reduced from 25 BPM
+                    confidence_threshold = 0.6  # Increased from 0.4
+                    print(f"Convergence mode: allowing moderate changes ({bpm_diff:.1f} BPM)")
                 else:
-                    stability_threshold = 15  # BPM tolerance after convergence
-                    confidence_threshold = 0.6
+                    stability_threshold = 8  # Reduced from 15 BPM for better stability
+                    confidence_threshold = 0.7  # Increased from 0.6
                 
-                if bpm_diff > stability_threshold:
+                # Additional physiological constraint: prevent extreme jumps
+                max_physiological_change = 20  # Maximum physiologically reasonable change
+                if bpm_diff > max_physiological_change:
+                    print(f"Physiological constraint: {bpm_diff:.1f} BPM change > {max_physiological_change} BPM - rejecting")
+                    hr_bpm = last_bpm
+                    hr_freq = self.last_hr_freq
+                    confidence = 0.3  # Low confidence for rejected measurement
+                elif bpm_diff > stability_threshold:
                     print(f"Stability check failed: {bpm_diff:.1f} BPM change > {stability_threshold} BPM threshold")
                     if confidence < confidence_threshold:
                         print(f"Low confidence ({confidence:.2f}) - keeping previous BPM")
                         hr_bpm = last_bpm
                         hr_freq = self.last_hr_freq
+                        confidence = 0.4  # Reduced confidence when keeping previous
                     else:
                         print(f"High confidence ({confidence:.2f}) - allowing BPM change")
                 else:

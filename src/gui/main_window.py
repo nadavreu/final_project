@@ -55,7 +55,7 @@ class MainWindow(BaseWindow):
         self.setup_detector()
         self.init_ui()
         
-        self.current_roi = None
+        self.current_rois = None  # Changed to support multiple ROIs
         self.prev_frame = None
         self.last_frame_time = None
         
@@ -599,22 +599,12 @@ class MainWindow(BaseWindow):
             # Store current frame for processing
             self.current_frame = frame.copy()
 
-            # Detect/track face and get ROI
-            # if self.current_roi is None:
-            #     face = self.face_detector.detect_face(frame)
-            #     if face is not None:
-            #         self.current_roi = self.face_detector.get_forehead_roi(frame, face)
-            # else:
-            #     success, new_roi = self.face_detector.track_roi(frame, self.current_frame, self.current_roi)
-            #     if success:
-            #         self.current_roi = new_roi
-            #     else:
-            #         self.current_roi = None
-            face = self.face_detector.detect_face(frame)
-            if face is not None:
-                self.current_roi = self.face_detector.get_forehead_roi(frame, face)
+            # Detect face and get all ROIs (forehead + cheeks)
+            landmarks = self.face_detector.detect_face(frame)
+            if landmarks is not None:
+                self.current_rois = self.face_detector.get_all_rois(frame, landmarks)
             else:
-                self.current_roi = None
+                self.current_rois = None
 
             # Process frame in background
             self.process_frame(frame)
@@ -644,24 +634,33 @@ class MainWindow(BaseWindow):
                 self.freq_value.setText("-- Hz")
                 # Don't clear plot data - keep history for graphs
             
-            # Process frame if we have a valid ROI
-            if self.current_roi is not None:
-                x, y, w, h = self.current_roi
-                roi_frame = frame[y:y+h, x:x+w]
+            # Process frame if we have valid ROIs
+            if self.current_rois is not None and any(self.current_rois.values()):
+                # Calculate combined green channel mean from all ROIs
+                total_green_mean = 0.0
+                valid_rois = 0
                 
-                # Extract green channel mean from ROI
-                green_mean = np.mean(roi_frame[:, :, 1])
+                for roi_name, roi in self.current_rois.items():
+                    if roi is not None:
+                        x, y, w, h = roi
+                        roi_frame = frame[y:y+h, x:x+w]
+                        green_mean = np.mean(roi_frame[:, :, 1])
+                        total_green_mean += green_mean
+                        valid_rois += 1
                 
-                # Store raw value
-                self.raw_values.append(green_mean)
-                self.signal_times.append(current_time)
+                if valid_rois > 0:
+                    combined_green_mean = total_green_mean / valid_rois
+                    
+                    # Store raw value
+                    self.raw_values.append(combined_green_mean)
+                    self.signal_times.append(current_time)
+                    
+                    # Enable reset button only when stopped and we have data
+                    if not self.is_running and len(self.raw_values) > 0 and not self.reset_button.isEnabled():
+                        self.reset_button.setEnabled(True)
                 
-                # Enable reset button only when stopped and we have data
-                if not self.is_running and len(self.raw_values) > 0 and not self.reset_button.isEnabled():
-                    self.reset_button.setEnabled(True)
-                
-                # Process signal to get heart rate
-                bpm, confidence = self.signal_processor.process_frame(frame, self.current_roi)
+                # Process signal to get heart rate using all ROIs
+                bpm, confidence = self.signal_processor.process_frame(frame, self.current_rois)
                 
                 if bpm is not None:
                     # Update heart rate display and save to database
@@ -670,15 +669,24 @@ class MainWindow(BaseWindow):
                     # Update frequency display
                     freq = bpm / 60.0
                     self.freq_value.setText(f"{freq:.2f} Hz")
-                    
-                    # Store heart rate data for plotting (already done in update_hr_display)
-                    # self.hr_values.append(bpm)
-                    # self.hr_times.append(current_time)
                 
-                # Draw ROI on frame
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                # Draw all ROIs on frame with different colors
+                colors = {
+                    'forehead': (0, 255, 0),    # Green
+                    'left_cheek': (255, 0, 0),  # Blue
+                    'right_cheek': (0, 0, 255)  # Red
+                }
+                
+                for roi_name, roi in self.current_rois.items():
+                    if roi is not None:
+                        x, y, w, h = roi
+                        color = colors.get(roi_name, (0, 255, 0))
+                        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+                        # Add label
+                        cv2.putText(frame, roi_name.replace('_', ' ').title(), 
+                                  (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             else:
-                # Call signal processor with None ROI to trigger reset
+                # Call signal processor with None ROIs to trigger reset
                 self.signal_processor.process_frame(frame, None)
             
             # Update plots

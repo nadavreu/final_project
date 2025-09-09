@@ -244,7 +244,7 @@ class HomeWindow(BaseWindow):
 
     def show_add_patient(self):
         """Show the add patient window."""
-        self.add_patient_window = AddPatientWindow()
+        self.add_patient_window = AddPatientWindow(user_role=self.user_role)
         self.add_patient_window.show()
         self.hide()
 

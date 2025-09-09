@@ -7,9 +7,10 @@ from database.db import Database
 from .base_window import BaseWindow
 
 class AddPatientWindow(BaseWindow):
-    def __init__(self):
+    def __init__(self,user_role=None):
         # Initialize with back button but no power off button
         super().__init__(show_back_button=True, show_power_off=False)
+        self.user_role = user_role
         self.init_ui()
 
     def init_ui(self):
@@ -141,7 +142,7 @@ class AddPatientWindow(BaseWindow):
     def go_back(self):
         """Return to home window."""
         from .home_window import HomeWindow
-        self.home_window = HomeWindow()  # No role needed for patient window
+        self.home_window = HomeWindow(user_role=self.user_role)  # No role needed for patient window
         self.home_window.show()
         self.close()
 

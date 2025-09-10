@@ -763,7 +763,7 @@ class SignalProcessor:
 
         if valid_rois == 0:
             print("No valid ROIs found - returning last valid measurement")
-            return self.last_bpm, 0.0
+            return self.last_bpm, 0.0, None, None, {}
 
         # Combine signals from all valid ROIs
         combined_signal = self._combine_roi_signals(roi_signals)
@@ -782,25 +782,30 @@ class SignalProcessor:
         # Convert combined buffer to numpy array
         signal = np.array(self.combined_buffer)
 
-        # Step 1: Smooth
-        signal = self.preprocessor.smooth_temporal(signal)
+        # Step 1: Enhanced signal preprocessing pipeline
+        signal = self.preprocessor.enhance_heart_rate_signal(signal)
 
-        # Step 2: Denoise (adaptive notch)
-        signal = self.preprocessor.apply_adaptive_notch(signal)
-
-        # Step 3: Normalize (robust)
-        signal = self.preprocessor.normalize_robust(signal)
-
-        # Step 4: PPG signal enhancement (replacing ICA)
+        # Step 2: Additional PPG signal enhancement (replacing ICA)
         signal = self.enhance_ppg_signal(signal)
 
-        # Step 5: Estimate heart rate
-        bpm, confidence = self.hr_estimator.estimate(signal)
+        # Step 5: Heart rate estimation using FFT method only
+        freq_bpm, freq_confidence = self.hr_estimator.estimate(signal)
+        
+        # Use FFT method (which is working well based on your feedback)
+        if freq_bpm is not None and freq_confidence > 0.4:
+            bpm, confidence = freq_bpm, freq_confidence
+            method_used = "frequency_domain"
+            print(f"Using FFT method: {bpm:.1f} BPM, confidence: {confidence:.2f}")
+        else:
+            # FFT method failed
+            bpm, confidence = None, 0.0
+            method_used = "none"
+            print("FFT heart rate estimation failed")
 
         # Step 6: Enhanced confidence validation
         if bpm is not None and confidence is not None:
-            # Additional confidence checks
-            min_confidence_threshold = 0.5  # Minimum confidence to accept measurement
+            # Additional confidence checks - using FFT method only
+            min_confidence_threshold = 0.4  # Threshold for FFT method
             
             # Check for physiologically reasonable values
             if not (40 <= bpm <= 180):
@@ -817,7 +822,8 @@ class SignalProcessor:
             # Check for sudden changes from last valid measurement
             elif self.last_bpm is not None:
                 bpm_change = abs(bpm - self.last_bpm)
-                if bpm_change > 15 and confidence < 0.8:  # Large change requires high confidence
+                # Simple constraint - only reject if change is very large with low confidence
+                if bpm_change > 20 and confidence < 0.6:
                     print(f"Large BPM change ({bpm_change:.1f}) with low confidence ({confidence:.2f}) - rejecting")
                     bpm = None
                     confidence = 0.0
@@ -870,7 +876,28 @@ class SignalProcessor:
             filtered_bpm = self.last_bpm  # Keep last valid measurement
             confidence = 0.0
 
-        return filtered_bpm, confidence
+        # Calculate FFT for display if we have enough signal data
+        fft_freqs, fft_power = None, None
+        if len(signal) >= 64:  # Need minimum samples for meaningful FFT
+            try:
+                from scipy.signal import welch
+                window_size = min(512, len(signal))
+                fft_freqs, fft_power = welch(signal, fs=self.fs, nperseg=window_size, nfft=2**10)
+                
+                # Focus on heart rate frequency range (0.5-3 Hz)
+                hr_mask = (fft_freqs >= 0.5) & (fft_freqs <= 3.0)
+                fft_freqs = fft_freqs[hr_mask]
+                fft_power = fft_power[hr_mask]
+            except Exception as e:
+                print(f"FFT calculation error: {e}")
+                fft_freqs, fft_power = None, None
+
+        # Include method data in return (no cardiac cycle data needed)
+        method_data = {
+            'method_used': method_used if 'method_used' in locals() else 'none'
+        }
+
+        return filtered_bpm, confidence, fft_freqs, fft_power, method_data
 
     def _update_roi_health(self, roi_name, is_stable):
         """Update ROI health based on stability."""

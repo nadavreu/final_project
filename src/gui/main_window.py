@@ -46,6 +46,9 @@ class MainWindow(BaseWindow):
         self.raw_values = deque(maxlen=max_samples)
         self.hr_times = deque(maxlen=max_samples)
         self.hr_values = deque(maxlen=max_samples)
+        self.fft_freqs = deque(maxlen=512)  # FFT frequency bins
+        self.fft_power = deque(maxlen=512)  # FFT power spectrum
+        self.cardiac_cycle_data = deque(maxlen=100)  # Cardiac cycle data
         self.start_time = None
         
         # Initialize components in correct order
@@ -244,6 +247,15 @@ class MainWindow(BaseWindow):
         self.freq_value.setStyleSheet('font-weight: bold;')
         quality_layout.addWidget(quality_label)
         quality_layout.addWidget(self.freq_value)
+        
+        # Method indicator
+        method_label = QLabel('Method:')
+        method_label.setStyleSheet('font-weight: bold;')
+        self.method_value = QLabel('--')
+        self.method_value.setStyleSheet('font-weight: bold; color: #1976D2;')
+        quality_layout.addWidget(method_label)
+        quality_layout.addWidget(self.method_value)
+        
         measurements_layout.addLayout(quality_layout)
         
         right_layout.addWidget(measurements_widget)
@@ -275,9 +287,21 @@ class MainWindow(BaseWindow):
         self.hr_ax.grid(True)
         self.hr_figure.tight_layout()
         
+        # Create FFT plot
+        self.fft_figure = plt.figure(figsize=(8, 3), dpi=plot_dpi)
+        self.fft_canvas = FigureCanvas(self.fft_figure)
+        self.fft_canvas.setMinimumHeight(self.scaled(200))
+        self.fft_ax = self.fft_figure.add_subplot(111)
+        self.fft_ax.set_title('FFT Power Spectrum')
+        self.fft_ax.set_xlabel('Frequency (Hz)')
+        self.fft_ax.set_ylabel('Power')
+        self.fft_ax.grid(True)
+        self.fft_figure.tight_layout()
+        
         # Add plots to layout
         right_layout.addWidget(self.signal_canvas)
         right_layout.addWidget(self.hr_canvas)
+        right_layout.addWidget(self.fft_canvas)
         
         # Initialize data storage
         from collections import deque
@@ -286,6 +310,9 @@ class MainWindow(BaseWindow):
         self.hr_values = deque(maxlen=1000)
         self.hr_times = deque(maxlen=1000)
         self.signal_values = deque(maxlen=1000)
+        self.fft_freqs = deque(maxlen=512)
+        self.fft_power = deque(maxlen=512)
+        self.cardiac_cycle_data = deque(maxlen=100)
         self.start_time = None
         
         main_layout.addWidget(right_panel)
@@ -452,6 +479,9 @@ class MainWindow(BaseWindow):
                 self.signal_values.clear()
                 self.hr_times.clear()
                 self.hr_values.clear()
+                self.fft_freqs.clear()
+                self.fft_power.clear()
+                self.cardiac_cycle_data.clear()
                 
                 # Disable reset button when starting new measurement
                 self.reset_button.setEnabled(False)
@@ -484,6 +514,9 @@ class MainWindow(BaseWindow):
                 self.raw_values.clear()
                 self.hr_times.clear()
                 self.hr_values.clear()
+                self.fft_freqs.clear()
+                self.fft_power.clear()
+                self.cardiac_cycle_data.clear()
                 self.start_time = None
                 
                 # Reset signal processor for fresh measurement
@@ -497,6 +530,7 @@ class MainWindow(BaseWindow):
                 # Reset display values
                 self.heart_rate_value.setText('-- BPM')
                 self.freq_value.setText('-- Hz')
+                self.method_value.setText('--')
                 
                 # Enable reset button if we had data before clearing
                 if has_data:
@@ -521,6 +555,8 @@ class MainWindow(BaseWindow):
         self.raw_values.clear()
         self.hr_times.clear()
         self.hr_values.clear()
+        self.fft_freqs.clear()
+        self.fft_power.clear()
         
         # Reset signal processor for fresh measurement
         if hasattr(self, 'signal_processor'):
@@ -533,6 +569,7 @@ class MainWindow(BaseWindow):
         # Reset display values
         self.heart_rate_value.setText('-- BPM')
         self.freq_value.setText('-- Hz')
+        self.method_value.setText('--')
         
         # Enable reset button if we had data before clearing
         if has_data:
@@ -547,6 +584,9 @@ class MainWindow(BaseWindow):
         if hasattr(self, 'hr_ax') and self.hr_ax:
             self.hr_ax.clear()
             self.hr_canvas.draw()
+        if hasattr(self, 'fft_ax') and self.fft_ax:
+            self.fft_ax.clear()
+            self.fft_canvas.draw()
 
     def setup_quality_indicator(self):
         """Set up the signal quality indicator."""
@@ -632,6 +672,7 @@ class MainWindow(BaseWindow):
                 print("Clearing displays due to ROI loss")
                 self.heart_rate_value.setText("-- BPM")
                 self.freq_value.setText("-- Hz")
+                self.method_value.setText("--")
                 # Don't clear plot data - keep history for graphs
             
             # Process frame if we have valid ROIs
@@ -660,15 +701,46 @@ class MainWindow(BaseWindow):
                         self.reset_button.setEnabled(True)
                 
                 # Process signal to get heart rate using all ROIs
-                bpm, confidence = self.signal_processor.process_frame(frame, self.current_rois)
+                result = self.signal_processor.process_frame(frame, self.current_rois)
+                if len(result) == 5:
+                    bpm, confidence, fft_freqs, fft_power, method_data = result
+                elif len(result) == 4:
+                    bpm, confidence, fft_freqs, fft_power = result
+                    method_data = {}
+                else:
+                    bpm, confidence = result
+                    fft_freqs, fft_power = None, None
+                    method_data = {}
                 
                 if bpm is not None:
                     # Update heart rate display and save to database
                     self.update_hr_display(bpm)
                     
+                    # Update FFT data if available
+                    if fft_freqs is not None and fft_power is not None:
+                        self.fft_freqs.extend(fft_freqs)
+                        self.fft_power.extend(fft_power)
+                    
+                    # Update method data if available
+                    if method_data:
+                        self.cardiac_cycle_data.append(method_data)
+                    
                     # Update frequency display
                     freq = bpm / 60.0
                     self.freq_value.setText(f"{freq:.2f} Hz")
+                    
+                    # Update method display (always FFT now)
+                    if method_data and 'method_used' in method_data:
+                        method = method_data['method_used']
+                        if method == 'frequency_domain':
+                            self.method_value.setText('FFT')
+                            self.method_value.setStyleSheet('font-weight: bold; color: #2E7D32;')  # Green for FFT
+                        else:
+                            self.method_value.setText('FFT')
+                            self.method_value.setStyleSheet('font-weight: bold; color: #FF9800;')  # Orange for failed
+                    else:
+                        self.method_value.setText('FFT')
+                        self.method_value.setStyleSheet('font-weight: bold; color: #2E7D32;')  # Default to FFT
                 
                 # Draw all ROIs on frame with different colors
                 colors = {
@@ -793,11 +865,12 @@ class MainWindow(BaseWindow):
             self.logger.error("Error updating HR display: %s", str(e))
 
     def update_plots(self):
-        """Update signal and heart rate plots."""
+        """Update signal, heart rate, and FFT plots."""
         try:
             # Clear previous plots
             self.signal_ax.clear()
             self.hr_ax.clear()
+            self.fft_ax.clear()
             
             # Plot raw signal if we have data
             if len(self.raw_values) > 0:
@@ -806,10 +879,12 @@ class MainWindow(BaseWindow):
                 values = np.array(list(self.raw_values))
                 
                 # Plot the raw signal
-                self.signal_ax.plot(times, values, 'g-', linewidth=1)
+                self.signal_ax.plot(times, values, 'g-', linewidth=1, label='rPPG Signal')
+                
+                # No cardiac cycle markers needed since we're using FFT only
                 
                 # Set axis labels and title
-                self.signal_ax.set_title('Raw Signal')
+                self.signal_ax.set_title('rPPG Signal')
                 self.signal_ax.set_xlabel('Time (s)')
                 self.signal_ax.set_ylabel('Amplitude')
                 
@@ -822,8 +897,9 @@ class MainWindow(BaseWindow):
                 # Auto-scale y-axis
                 self.signal_ax.set_ylim(np.min(values) - 1, np.max(values) + 1)
                 
-                # Add grid
+                # Add grid and legend
                 self.signal_ax.grid(True, alpha=0.3)
+                self.signal_ax.legend(loc='upper right', fontsize=8)
             
             # Plot heart rate if we have data
             if len(self.hr_values) > 0:
@@ -853,13 +929,44 @@ class MainWindow(BaseWindow):
                 # Add grid
                 self.hr_ax.grid(True, alpha=0.3)
             
+            # Plot FFT if we have data
+            if len(self.fft_freqs) > 0 and len(self.fft_power) > 0:
+                # Convert lists to numpy arrays
+                fft_freqs = np.array(list(self.fft_freqs))
+                fft_power = np.array(list(self.fft_power))
+                
+                # Plot the FFT power spectrum
+                self.fft_ax.plot(fft_freqs, fft_power, 'b-', linewidth=1)
+                
+                # Set axis labels and title
+                self.fft_ax.set_title('FFT Power Spectrum')
+                self.fft_ax.set_xlabel('Frequency (Hz)')
+                self.fft_ax.set_ylabel('Power')
+                
+                # Set x-axis limits for heart rate range
+                self.fft_ax.set_xlim(0.5, 3.0)
+                
+                # Auto-scale y-axis
+                if len(fft_power) > 0:
+                    self.fft_ax.set_ylim(0, np.max(fft_power) * 1.1)
+                
+                # Add grid
+                self.fft_ax.grid(True, alpha=0.3)
+                
+                # Add vertical lines for common heart rate frequencies
+                self.fft_ax.axvline(x=1.0, color='r', linestyle='--', alpha=0.5, label='60 BPM')
+                self.fft_ax.axvline(x=1.2, color='g', linestyle='--', alpha=0.5, label='72 BPM')
+                self.fft_ax.axvline(x=1.5, color='orange', linestyle='--', alpha=0.5, label='90 BPM')
+            
             # Adjust layout to prevent overlapping
             self.signal_figure.tight_layout()
             self.hr_figure.tight_layout()
+            self.fft_figure.tight_layout()
             
-            # Redraw both canvases
+            # Redraw all canvases
             self.signal_canvas.draw()
             self.hr_canvas.draw()
+            self.fft_canvas.draw()
             
         except Exception as e:
             self.logger.error(f"Error updating plots: {str(e)}")
@@ -893,6 +1000,7 @@ class MainWindow(BaseWindow):
         # Reset display values
         self.heart_rate_value.setText('-- BPM')
         self.freq_value.setText('-- Hz')
+        self.method_value.setText('--')
         
         # Disable reset button since no data is available after reset
         self.reset_button.setEnabled(False)

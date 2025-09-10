@@ -1,25 +1,73 @@
 import numpy as np
 import time
-from scipy.signal import welch, find_peaks, peak_prominences
+from scipy.signal import welch, find_peaks, peak_prominences, butter, filtfilt
 from scipy.stats import entropy
+from collections import deque
 
 class HeartRateEstimator:
     def __init__(self, sampling_rate):
         self.fs = sampling_rate
         self.min_hr_hz = 40 / 60.0
         self.max_hr_hz = 180 / 60.0
+        
+        # Simple tracking without complex locking
         self.last_hr_freq = None
-        self.freq_stability_threshold = 0.5  # Hz tolerance for frequency changes (more lenient)
-        self.min_confidence_threshold = 0.4  # Lower confidence threshold to allow better convergence
-        self.convergence_mode = True  # Allow more flexibility during initial convergence
-        self.convergence_timeout = 30  # seconds to allow convergence
-        self.start_time = time.time()
+        self.hr_history = deque(maxlen=10)  # Track recent heart rate estimates
+        self.confidence_history = deque(maxlen=10)  # Track recent confidence values
+        
+        # Peak selection parameters
+        self.min_confidence_threshold = 0.4  # Lower threshold for more responsive detection
+        self.peak_prominence_factor = 0.15  # Minimum prominence relative to max power
+        
+        # Physiological constraints
+        self.physiological_range = (40, 180)  # BPM range
+        self.max_physiological_change = 20  # Maximum reasonable change per update
+        
+        # Signal quality tracking
+        self.signal_quality_history = deque(maxlen=5)
+
+
+    def _assess_signal_quality_simple(self, signal, freqs, power):
+        """Simple signal quality assessment focused on heart rate content."""
+        try:
+            # 1. Signal-to-noise ratio in heart rate band
+            hr_power = np.sum(power)
+            total_power = np.sum(power)  # Already filtered to HR band
+            snr = hr_power / (total_power + 1e-6)
+            
+            # 2. Peak clarity - how distinct the main peak is
+            peaks, _ = find_peaks(power, distance=5, prominence=0.1*np.max(power))
+            if len(peaks) > 0:
+                peak_heights = power[peaks]
+                max_peak = np.max(peak_heights)
+                avg_peak = np.mean(peak_heights)
+                peak_clarity = max_peak / (avg_peak + 1e-6)
+            else:
+                peak_clarity = 0.0
+            
+            # 3. Temporal consistency (if we have history)
+            temporal_consistency = 0.5  # Default
+            if len(self.signal_quality_history) > 2:
+                recent_qualities = list(self.signal_quality_history)[-3:]
+                quality_std = np.std(recent_qualities)
+                temporal_consistency = 1.0 / (1.0 + quality_std * 5)
+            
+            # Combined quality score
+            quality = (0.4 * min(snr / 2.0, 1.0) +  # SNR component
+                      0.4 * min(peak_clarity / 3.0, 1.0) +  # Peak clarity
+                      0.2 * temporal_consistency)  # Temporal consistency
+            
+            return min(quality, 1.0)
+            
+        except Exception:
+            return 0.0
+
 
     def estimate(self, signal):
-        """Estimate heart rate using frequency domain with robust peak selection."""
+        """Simple and robust heart rate estimation based on clean signal analysis."""
         try:
-            # 1. Frequency domain analysis with longer window for stability
-            window_size = min(512, len(signal))  # Longer window for better frequency resolution
+            # 1. Frequency domain analysis with longer window for better resolution
+            window_size = min(512, len(signal))
             freqs, power = welch(signal, fs=self.fs, nperseg=window_size, nfft=2**12)
             
             # 2. Focus on heart rate band
@@ -30,97 +78,71 @@ class HeartRateEstimator:
             if len(power) == 0:
                 return None, 0.0
             
-            # 3. Find peaks with robust criteria
-            # Use relative prominence to avoid being too sensitive
-            min_prominence = 0.15 * np.max(power)  # Higher threshold for stability
+            # 3. Find the most prominent peak
+            min_prominence = self.peak_prominence_factor * np.max(power)
             peaks, properties = find_peaks(power, distance=5, prominence=min_prominence)
             
             if len(peaks) == 0:
                 return None, 0.0
             
-            # 4. Score peaks based on multiple criteria
-            peak_scores = []
-            for i, peak_idx in enumerate(peaks):
-                freq = freqs[peak_idx]
-                hr_bpm = freq * 60.0
-                
-                # Score based on peak quality, not frequency preference
-                prominence = properties['prominences'][i] / np.max(power)
-                
-                # Prefer peaks that are well-separated from others
-                separation_score = 1.0
-                for j, other_peak in enumerate(peaks):
-                    if i != j:
-                        other_freq = freqs[other_peak]
-                        freq_diff = abs(freq - other_freq)
-                        if freq_diff < 0.1:  # Penalize peaks too close to others
-                            separation_score *= 0.5
-                
-                # Combined score - focus on peak quality, not frequency
-                score = 0.7 * prominence + 0.3 * separation_score
-                peak_scores.append(score)
-            
-            # 5. Select best peak
-            best_idx = peaks[np.argmax(peak_scores)]
-            hr_freq = freqs[best_idx]
+            # 4. Select the peak with highest prominence
+            prominences = properties['prominences']
+            best_peak_idx = peaks[np.argmax(prominences)]
+            hr_freq = freqs[best_peak_idx]
             hr_bpm = hr_freq * 60.0
             
-            # DIAGNOSTIC: Print all peaks for debugging
-            print(f"All detected peaks:")
-            for i, peak_idx in enumerate(peaks):
-                freq = freqs[peak_idx]
-                bpm = freq * 60.0
-                prominence = properties['prominences'][i] / np.max(power)
-                print(f"  Peak {i}: {bpm:.1f} BPM ({freq:.3f} Hz), prominence={prominence:.3f}, score={peak_scores[i]:.3f}")
-            print(f"Selected: {hr_bpm:.1f} BPM ({hr_freq:.3f} Hz)")
+            # 5. Calculate confidence based on peak quality
+            max_prominence = np.max(prominences)
+            avg_power = np.mean(power)
+            peak_quality = max_prominence / (avg_power + 1e-6)
             
-            # 6. Calculate confidence based on peak quality
-            best_score = max(peak_scores)
-            confidence = min(best_score, 1.0)
+            # 6. Assess signal quality
+            signal_quality = self._assess_signal_quality_simple(signal, freqs, power)
             
-            # 7. Enhanced stability check with physiological constraints
-            current_time = time.time()
-            in_convergence = current_time - self.start_time < self.convergence_timeout
+            # 7. Calculate final confidence
+            confidence = min(1.0, 0.6 * peak_quality + 0.4 * signal_quality)
             
+            # 8. Apply physiological constraints
+            if not (self.physiological_range[0] <= hr_bpm <= self.physiological_range[1]):
+                print(f"Physiological constraint: {hr_bpm:.1f} BPM outside range")
+                return None, 0.0
+            
+            # 9. Check for reasonable changes from last measurement
             if self.last_hr_freq is not None:
                 last_bpm = self.last_hr_freq * 60.0
-                bpm_diff = abs(hr_bpm - last_bpm)
+                bpm_change = abs(hr_bpm - last_bpm)
                 
-                # More conservative thresholds to prevent sudden jumps
-                if in_convergence:
-                    stability_threshold = 15  # Reduced from 25 BPM
-                    confidence_threshold = 0.6  # Increased from 0.4
-                    print(f"Convergence mode: allowing moderate changes ({bpm_diff:.1f} BPM)")
-                else:
-                    stability_threshold = 8  # Reduced from 15 BPM for better stability
-                    confidence_threshold = 0.7  # Increased from 0.6
-                
-                # Additional physiological constraint: prevent extreme jumps
-                max_physiological_change = 20  # Maximum physiologically reasonable change
-                if bpm_diff > max_physiological_change:
-                    print(f"Physiological constraint: {bpm_diff:.1f} BPM change > {max_physiological_change} BPM - rejecting")
-                    hr_bpm = last_bpm
-                    hr_freq = self.last_hr_freq
-                    confidence = 0.3  # Low confidence for rejected measurement
-                elif bpm_diff > stability_threshold:
-                    print(f"Stability check failed: {bpm_diff:.1f} BPM change > {stability_threshold} BPM threshold")
-                    if confidence < confidence_threshold:
-                        print(f"Low confidence ({confidence:.2f}) - keeping previous BPM")
-                        hr_bpm = last_bpm
-                        hr_freq = self.last_hr_freq
-                        confidence = 0.4  # Reduced confidence when keeping previous
-                    else:
-                        print(f"High confidence ({confidence:.2f}) - allowing BPM change")
-                else:
-                    print(f"BPM stable: {bpm_diff:.1f} BPM change")
+                # More aggressive change detection to prevent dips
+                if bpm_change > self.max_physiological_change and confidence < 0.8:
+                    print(f"Large change constraint: {bpm_change:.1f} BPM change with confidence {confidence:.2f}")
+                    return last_bpm, 0.3  # Return previous value with low confidence
+                elif bpm_change > 15 and confidence < 0.6:  # Medium changes need good confidence
+                    print(f"Medium change constraint: {bpm_change:.1f} BPM change with confidence {confidence:.2f}")
+                    return last_bpm, 0.4
             
-            # Update last frequency
+            # 10. Temporal consistency check using history
+            if len(self.hr_history) >= 3:
+                recent_hrs = list(self.hr_history)[-3:]
+                hr_std = np.std(recent_hrs)
+                
+                # If current measurement is very different from recent trend, reduce confidence
+                if hr_std < 5.0:  # Recent measurements are consistent
+                    recent_mean = np.mean(recent_hrs)
+                    if abs(hr_bpm - recent_mean) > 10 and confidence < 0.7:
+                        print(f"Temporal consistency: {hr_bpm:.1f} BPM differs from recent trend {recent_mean:.1f} BPM")
+                        return recent_mean, 0.5  # Return recent trend with medium confidence
+            
+            # 10. Update tracking
             self.last_hr_freq = hr_freq
+            self.hr_history.append(hr_bpm)
+            self.confidence_history.append(confidence)
+            self.signal_quality_history.append(signal_quality)
             
-            print(f"Frequency-domain HR: {hr_bpm:.1f} BPM, confidence: {confidence:.2f}, peaks: {len(peaks)}")
+            print(f"HR Estimation: {hr_bpm:.1f} BPM, confidence: {confidence:.2f}, "
+                  f"signal_quality: {signal_quality:.2f}, peak_quality: {peak_quality:.2f}")
             
             return hr_bpm, confidence
             
         except Exception as e:
-            print(f"Frequency-domain estimation error: {e}")
+            print(f"HR estimation error: {e}")
             return None, 0.0
